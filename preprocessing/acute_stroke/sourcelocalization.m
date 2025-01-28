@@ -1,8 +1,8 @@
 %% batch source localization of preprocessed EEG data
 clear;clc;
-addpath(genpath('D:\code\toolbox\fieldtrip-20240515'))
+addpath(genpath('/Users/cizer/Downloads/taoliu/fieldtrip-20250114'))
 % load brainnetome atlas
-atlas = ft_read_atlas('D:\code\toolbox\fieldtrip-20240515\template\atlas\aal\ROI_MNI_V4.nii');
+atlas = ft_read_atlas('/Users/cizer/Downloads/taoliu/fieldtrip-20250114/template/atlas/aal/ROI_MNI_V4.nii');
 atlas = ft_convert_units(atlas, 'mm');
 freqBand.freq = [[1 3];[4 8];[8 13];[13 30];[30 40]];
 freqBand.freqLabel = {'detla','theta','alpha','beta','gamma'};
@@ -10,20 +10,21 @@ freqBand.freqLabel = {'detla','theta','alpha','beta','gamma'};
 paradim = 'AO';
 ROIs = [1 2 19 20 59 60 61 62];
 
-data_dir = 'D:\code\dataset\acute_stroke\edffile';
+data_dir = '/Users/cizer/Downloads/taoliu/newcode/EEG-Neural-Manifolds/dataset/acute_stroke_dataset/edffile';
+
 subj_list = dir(data_dir);
 %% 
 for subj_num = 1:length(subj_list)
-    subj_name = subj_list(subj_num).name;
+    subj_name = subj_list(subj_num+3).name;
 
     % load headmodel
-    load('D:\code\toolbox\fieldtrip-20240515\template\headmodel\standard_bem.mat');
+    load('/Users/cizer/Downloads/taoliu/fieldtrip-20250114/template/headmodel//standard_bem.mat');
 
     % load electrode information
-    load('D:\code\dataset\acute_stroke\elec_realigned_1.mat');
+    load('/Users/cizer/Downloads/taoliu/newcode/EEG-Neural-Manifolds/tool/elec_realigned_1.mat');
 
     % load preprocessed data
-    EEG = pop_loadset([data_dir,'\',subj_name,'\eeg\setfiles\',subj_name,'_preprocessed.set']);
+    EEG = pop_loadset([data_dir,'/',subj_name,'/eeg/setfiles/',subj_name,'_preprocessed.set']);
     EEG = eeg_checkset( EEG );
     data = eeglab2fieldtrip(EEG, 'preprocessing');
 
