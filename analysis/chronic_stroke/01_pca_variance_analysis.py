@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import os
 import logging
+from utils import get_data_mat
 from mat73 import loadmat
 from sklearn.decomposition import PCA
 from scipy import stats
@@ -20,17 +21,20 @@ class Config:
         self.ROIS = [1, 2, 19, 20, 59, 60, 61, 62]
         self.ROI_LABELS = ['PreCG.L', 'PreCG.R', 'SMA.L', 'SMA.R', 
                           'SPG.L', 'SPG.R', 'IPL.L', 'IPL.R']
-        self.SUBJECTS =  ['kmt', 'wws', 'nsk', 'nwc', 'ock', 'wwf', 'wsc']
+        self.SUBJECTS =  ['kmt','ock']
         self.PARADIGMS = ['AO1', 'rest']
+        self.STAGES = ['pre', 'post']
         self.FREQ_BANDS = ['alpha', 'beta']
         self.THRESHOLD = 1
-        self.PC_NUM = 20
-        
+        self.PC_NUM = 4
+        self.TRIAL_NUM = 13
         self.PATHS = {
             'raw_data': 'EEG-Neural-Manifolds/dataset/chronic_stroke/',
-            'processed_data': './RESULTS/Multimodality/',
-            'figures': './RESULTS/figure/Multimodality/'
+            'pca_data': 'EEG-Neural-Manifolds/dataset/chronic_stroke/',
+            'figures': 'EEG-Neural-Manifolds/analysis/results/chronic_stroke/PCA_variance/'
         }
+        self.time_points = 200
+        self.sample_rate = 100
         
         # 模式相关配置
         self.mode = mode
@@ -41,7 +45,7 @@ class Config:
         if mode == 'PCA_VAR':
             self.time_points = 200
             self.sample_rate = 100
-            self.trial_num = 26
+            self.trial_num = 13
         elif mode == 'FMA_CORR':
             self.stages = ['pre', 'post']
         elif mode == 'STAGE_DIFF':
@@ -50,72 +54,120 @@ class Config:
 # ================== 核心函数 ==================
 class EEGAnalyzer:
 
-    def __init__(self, config):
+    def __init__(self, config, stage, paradigm, freq_band):
         self.cfg = config
         os.makedirs(self.cfg.PATHS['figures'], exist_ok=True)
-        
-    def load_raw_data(self, subject, roi, stage):
-        
+        self.stage = stage
+        self.paradigm = paradigm
+        self.freq_band = freq_band
+        self.paths = self.cfg.PATHS['raw_data']
+        self.save_path = self.cfg.PATHS['pca_data']
+        self.figure_path = self.cfg.PATHS['figures']
+    
+    def load_and_process_data(self, subject, roi):
+        """Load and process EEG data for a given subject and ROI."""
+        logging.info(f"Processing subject {subject}, ROI {roi}")
+        mom_voxel_list = []
         hemisphere = 'l' if roi % 2 == 0 else 'r'
-        data_list = []
         
-        for trial in range(1, self._get_trial_num(subject, stage)+1):
-            path = f"{self.cfg.PATHS['raw_data']}{stage}/{self.cfg.PARADIGM}/{subject}/trial/{roi}/"
-            file = f"{subject}_{self.cfg.PARADIGM}_{stage}_voxel_{trial}_{hemisphere}.mat"
+        # Determine the number of trials by counting the files
+        # trial_path = os.path.join(BASE_PATH, subject)
+        # trial_num = len([name for name in os.listdir(trial_path) if os.path.isfile(os.path.join(trial_path, name)) and name.endswith('.mat')])
+        
+        for num in tqdm(range(1, self.cfg.TRIAL_NUM + 1), desc=f"Loading trials for {subject}"):
             try:
-                data = loadmat(os.path.join(path, file))['momint_1']
-                data_list.append(
-                    eeg_bp_filter(data[:, :self.cfg.time_points], 
-                                fs=self.cfg.sample_rate, 
-                                freqb=self.cfg.FREQ_BAND)
-                )
-            except Exception as e:
-                logging.error(f"Error loading {file}: {str(e)}")
-        return data_list
-
-    def preprocess_data(self, raw_data):
-        """preprocess"""
-        
-        merged = np.concatenate(raw_data, axis=1)
-        for thres in range(int(np.mean(np.abs(merged), 1).min()),
-                          int(np.mean(np.abs(merged), 1).max())):
-            voxel_mask = np.mean(np.abs(merged), 1) >= thres
-            if np.sum(voxel_mask)/merged.shape[0] <= self.cfg.THRESHOLD:
-                break
+                file_path = f'{self.paths}{self.stage}/{self.paradigm}/{subject}/{str(roi)}/{subject}_{self.paradigm}_{self.stage}_voxel_{num}_{hemisphere}.mat'
+                mom_voxel = loadmat(file_path)['momint_1']
                 
-        # smoothing
-        smoothed = []
-        win = norm_gauss_window(0.03, 0.05)
-        for data in raw_data:
-            masked = smooth_average(data[voxel_mask, :], 3, 3)
-            smoothed.append(
-                smooth_data(masked.T, win=win, backend='convolve1d')[10:40, :].T
-            )
-        return smoothed
-
-    def calculate_pca(self, data_list, n_components):
+                # Apply bandpass filter
+                data_filter = eeg_bp_filter(mom_voxel[:, :self.cfg.time_points], fs=self.cfg.sample_rate, freqb=self.freq_band)
+                mom_voxel_list.append(data_filter)
+            except Exception as e:
+                logging.error(f"Error processing trial {num}: {str(e)}")
+                continue
         
-        model = PCA(n_components=n_components, svd_solver='full')
-        concat_data = np.concatenate(data_list, axis=1)
-        model.fit(concat_data.T)
-        return model.explained_variance_ratio_
+        return mom_voxel_list
 
-    def analyze_pca_variance(self):
+    @staticmethod
+    def apply_threshold_and_smooth(mom_voxel_list, threshold=1):
+        """Apply threshold and smoothing to the data."""
+        mom_temp = np.concatenate(mom_voxel_list, 1)
+        
+        # Find appropriate threshold
+        for thres in range(int(np.mean(np.abs(mom_temp), 1).min()), int(np.mean(np.abs(mom_temp), 1).max())):
+            voxels_idx = np.mean(np.abs(mom_temp), 1) >= thres
+            if np.sum(voxels_idx) / mom_temp.shape[0] <= threshold:
+                return [smooth_average(data[voxels_idx, :], 3, 3) for data in mom_voxel_list]
+        
+        return mom_voxel_list
+
+class PCAVarianceAnalyzer(EEGAnalyzer):
+    def analyze(self):
         """Mode 1: PCA analysis of variance"""
+        logging.info("Starting PCA variance analysis...")
         variance_results = []
+        variance_results_sum = []
         for roi in tqdm(self.cfg.ROIS, desc="Processing ROIs"):
-            roi_result = []
-            for subject in self.cfg.SUBJECTS['PCA']:
+            roi_variance_sum = []
+            roi_variance = []
+            for subject in self.cfg.SUBJECTS:
                 try:
-                    raw = self.load_raw_data(subject, roi, 'pre')
-                    processed = self.preprocess_data(raw)
-                    var_ratio = self.calculate_pca(processed, self.cfg.PC_NUM)
-                    roi_result.append(var_ratio)
+                    # Load and process data
+                    mom_voxel_list = self.load_and_process_data(subject, roi)
+                    logging.info(f"Applying threshold and smoothing for {subject}")
+                    
+                    # Apply threshold and smoothing
+                    mom_avg_list = self.apply_threshold_and_smooth(mom_voxel_list)
+                    
+                    # Apply Gaussian smoothing
+                    win = norm_gauss_window(0.03, 0.05)
+                    mom_smooth_list = [smooth_data(data.T, win=win, backend='convolve1d')[10:40, :].T 
+                                    for data in mom_avg_list]
+                    
+                    # Calculate PCA variance
+                    data_pca, var_ratio_sum, var_ratio = get_data_mat(mom_smooth_list, 20)
+                    pca_path = f"{self.save_path}pca_data/{self.stage}/{self.paradigm}/{subject}/{roi}/"
+                    os.makedirs(pca_path, exist_ok=True)
+                    np.save(f"{pca_path}{subject}_pca_trial_{self.freq_band}.npy", data_pca)
+                    roi_variance_sum.append(var_ratio_sum)
+                    roi_variance.append(var_ratio)
+                    logging.info(f"Completed processing for subject {subject}, ROI {roi}")
                 except Exception as e:
-                    logging.error(f"Error processing {subject}: {str(e)}")
-            variance_results.append(roi_result)
-        self._plot_variance(variance_results)
+                    logging.error(f"Error processing subject {subject}: {str(e)}")
+                    continue
+            variance_results_sum.append(roi_variance_sum)
+            variance_results.append(roi_variance)
+            
+        self.visualize_variance(variance_results_sum)
+        return variance_results
+    
+    def visualize_variance(self, variance_data):
+        """
+        Visualize PCA variance results.
+        
+        Args:
+            variance_data (list): List of variance data for each ROI
+            save_path (str): Path to save the figure
+        """
+        fig, ax = plt.subplots(ncols=1)
+        
+        for i, var in enumerate(variance_data):
+            var_temp = np.reshape(np.array(var), (-1, np.array(var).shape[-1]))
+            shaded_errorbar(ax, np.arange(1, 21), var_temp.T, label=self.cfg.ROI_LABELS[i])
+        
+        ax.legend(loc='lower right', fontsize=10)
+        ax.set_xlabel('Principal Components', fontdict={'size': 15})
+        ax.set_ylabel('Sum of Explained Variances', fontdict={'size': 15})
+        ax.set_title(f"{self.paradigm}-{self.freq_band}", fontdict={'size': 15})
+        ax.set_xticks(np.arange(2, 21, 2))
+        fig.tight_layout()
+        
+        fig.savefig(f"{self.figure_path}{self.paradigm}_{self.stage}_{self.freq_band}_var.png", format='png')
+        # fig.savefig(f"{self.cfg.PATHS['figures']}pca_variance.eps", format='eps')
+        # plt.show()
 
+        
+class FMACorrelationAnalyzer(EEGAnalyzer):
     def analyze_fma_correlation(self):
         """Mode 2: FMA correlation analysis"""
         # load FMA score
@@ -126,11 +178,11 @@ class EEGAnalyzer:
         var_changes = []
         for roi in self.cfg.ROIS:
             roi_var = []
-            for subject in self.cfg.SUBJECTS['FMA']:
-                pre_data = self.preprocess_data(
-                    self.load_raw_data(subject, roi, 'pre'))
-                post_data = self.preprocess_data(
-                    self.load_raw_data(subject, roi, 'post'))
+            for subject in self.cfg.SUBJECTS:
+                pre_pca_path = f"{self.save_path}pca_data/pre/{self.paradigm}/"
+                pre_data = np.load(f"{pre_pca_path}{subject}_pca_trial_{self.freq_band}.npy")
+                post_pca_path = f"{self.save_path}pca_data/post/{self.paradigm}/"
+                post_data = np.load()
                 var_diff = self.calculate_pca(post_data, 20) - self.calculate_pca(pre_data, 20)
                 roi_var.append(var_diff[:self.cfg.pc_components])
             var_changes.append(roi_var)
@@ -142,42 +194,6 @@ class EEGAnalyzer:
             correlations.append(corr.correlation)
         self._plot_correlations(correlations)
 
-    def analyze_stage_difference(self):
-        """Mode 3: Stage difference analysis"""
-        stage_vars = []
-        for stage in ['pre', 'post']:
-            stage_data = []
-            for roi in self.cfg.ROIS:
-                roi_data = [
-                    self.calculate_pca(
-                        self.preprocess_data(
-                            self.load_raw_data(subj, roi, stage)), 20)
-                    for subj in self.cfg.SUBJECTS['FMA']
-                ]
-                stage_data.append(roi_data)
-            stage_vars.append(stage_data)
-        
-        
-        diff = np.array(stage_vars[0]) - np.array(stage_vars[1])
-        p_values = [
-            stats.wilcoxon(diff[i].flatten()).pvalue 
-            for i in range(len(self.cfg.ROIS))
-        ]
-        self._plot_stage_diff(diff, p_values)
-
-    # ================== Visualize ==================
-    def _plot_variance(self, data):
-        
-        fig, ax = plt.subplots(figsize=(10,6))
-        for i, roi_data in enumerate(data):
-            avg = np.mean(roi_data, axis=0)
-            shaded_errorbar(ax, np.arange(1, len(avg)+1), avg, 
-                           label=self.cfg.ROI_LABELS[i])
-        ax.set(xlabel='Principal Components', ylabel='Explained Variance',
-              title=f'{self.cfg.PARADIGM}-{self.cfg.FREQ_BAND}')
-        ax.legend()
-        fig.savefig(f"{self.cfg.PATHS['figures']}pca_variance.eps", format='eps')
-
     def _plot_correlations(self, corrs):
         
         fig, ax = plt.subplots()
@@ -187,14 +203,120 @@ class EEGAnalyzer:
         plt.tight_layout()
         plt.show()
 
-    def _plot_stage_diff(self, diff_data, p_values):
+class DifferenceAnalyzer(EEGAnalyzer):
+    def analyze_stage_difference(self, pre_variance, post_variance):
+        """Mode 3: Stage difference analysis"""
+        var_pre = np.array(pre_variance)
+        print(f"Pre variance shape: {var_pre.shape}")
+        var_post = np.array(post_variance)
+        print(f"Post variance shape: {var_post.shape}")
+        var_diff = var_pre - var_post
+        p_values = []
+        for roi_idx in range(len(self.cfg.ROIS)):
+    
+            pre_flat = np.reshape(var_pre[roi_idx, :, :],-1)
+            post_flat = np.reshape(var_post[roi_idx, :, :],-1)
+            _, p = stats.wilcoxon(pre_flat, post_flat)
+            p_values.append(p)
+
+        labels = [f"{label}{'*' if p < 0.05 else ''}" for label, p in zip(self.cfg.ROI_LABELS, p_values)]
+        self._plot_stage_diff(var_diff, labels)
+        self.create_stacked_bar(var_pre, var_post, self.stage)
+
+    def _plot_stage_diff(self, diff_data, labels):
         
-        fig, ax = plt.subplots()
-        for i in range(len(self.cfg.ROIS)):
-            label = f"{self.cfg.ROI_LABELS[i]}{'*' if p_values[i]<0.05 else ''}"
-            ax.plot(np.mean(diff_data[i], axis=0)[:10], label=label)
-        ax.legend()
-        fig.savefig(f"{self.cfg.PATHS['figures']}stage_diff.eps", format='eps')
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        # plot 10 components
+        for roi_idx in range(len(self.cfg.ROIS)):
+            ax.plot(
+                np.mean(diff_data[roi_idx], axis=0)[:10],  
+                label=labels[roi_idx],
+                marker='o',
+                markersize=5,
+                linewidth=2
+            )
+        
+        ax.axhline(0, color='gray', linestyle='--', linewidth=0.8)
+        ax.set_xlabel('Principal Components', fontsize=14)
+        ax.set_ylabel('Variance Difference (Pre - Post)', fontsize=14)
+        ax.set_title(f'{self.paradigm}-{self.freq_band}', fontsize=16)
+        ax.set_xticks(np.arange(0, 10))
+        ax.set_xticklabels(np.arange(1, 11))
+        ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1))
+        ax.grid(alpha=0.3, linestyle='--')
+        
+        # save figure
+        fig.tight_layout()
+        save_path = f"{self.figure_path}{self.paradigm}_{self.freq_band}_stage_diff.png"
+        fig.savefig(save_path, format='png', dpi=1000)
+        plt.close(fig)
+
+    def create_stacked_bar(self, pre, post, stage_name):
+        """Create a stacked bar plot of the variance data."""
+        pc_num = self.cfg.PC_NUM  
+        components = [f'PC{i+1}' for i in range(pc_num)] + ['Others']
+        print(pre.shape)
+        print(post.shape)
+        pre_var = np.concatenate((pre[:, :,:pc_num],np.sum(pre[:,:,pc_num:],axis=-1,keepdims=True)),axis=-1)
+        var_pre_avg = np.mean(pre_var,axis=1)
+        print(var_pre_avg.shape)
+        post_var = np.concatenate((post[:, :,:pc_num],np.sum(post[:,:,pc_num:],axis=-1,keepdims=True)),axis=-1)
+        var_post_avg = np.mean(post_var,axis=1)
+        print(var_post_avg.shape)
+        # 平均处理
+        # avg_data = np.mean(merged_data, axis=1)
+        
+        # 绘图
+        fig, ax = plt.subplots(figsize=(12,6), dpi=300)
+        bottom = np.zeros(len(self.cfg.ROI_LABELS))
+        bottom_vals_pre = np.zeros(len(self.cfg.ROI_LABELS))
+        bottom_vals_post = np.zeros(len(self.cfg.ROI_LABELS))
+        
+        colors = np.array([(75,116,178),(144,190,224),(230,241,243),(255,223,146),(252,140,90),(219,49,36)])/255
+        x = np.arange(0, len(self.cfg.ROIS))+1
+        width = 0.45
+        for i in range(var_pre_avg.shape[-1]):
+            rects1 = ax.bar(x - width/2 - 0.01, var_pre_avg[:,i], width=width,bottom=bottom_vals_pre,
+                            label=components[i], color=colors[i], edgecolor='none')
+            bottom_vals_pre += var_pre_avg[:,i]
+            rects2 = ax.bar(x + width/2 + 0.01, var_post_avg[:, i], width=width, bottom=bottom_vals_post,
+                            color=colors[i], edgecolor='none')
+            bottom_vals_post += var_post_avg[:, i]
+        # ax.set_ylim([0,1.01])
+        # plt.show()
+        ax.set_xticks(x)
+        ax.set_xticklabels(self.cfg.ROI_LABELS,fontsize=12)
+        ax.set_xlabel('Regions of Interest', fontsize=15)
+        ax.set_ylabel('Explained Variance(%)', fontsize=15)
+        plt.grid(axis='y',alpha=0.5,ls='--')
+        plt.legend(frameon=False, bbox_to_anchor=(1.01,1), fontsize=12)
+        plt.tight_layout()
+        fig.savefig(
+            f"{self.figure_path}{stage_name}_stacked_bar.png",
+            format='png', 
+            bbox_inches='tight',
+            dpi=1000
+        )
+        plt.show()
+        # plt.show()
+        # plt.close(fig)
+
+
+    # def _plot_variance(self, data):
+        
+    #     fig, ax = plt.subplots(figsize=(10,6))
+    #     for i, roi_data in enumerate(data):
+    #         avg = np.mean(roi_data, axis=0)
+    #         shaded_errorbar(ax, np.arange(1, len(avg)+1), avg, 
+    #                        label=self.cfg.ROI_LABELS[i])
+    #     ax.set(xlabel='Principal Components', ylabel='Explained Variance',
+    #           title=f'{self.cfg.PARADIGM}-{self.cfg.FREQ_BAND}')
+    #     ax.legend()
+    #     fig.savefig(f"{self.cfg.PATHS['figures']}pca_variance.png", format='png')
+    #     # fig.savefig(f"{self.cfg.PATHS['figures']}pca_variance.eps", format='eps')
+    #     plt.show()
+
 
 # ================== MAIN ==================
 if __name__ == "__main__":
@@ -204,12 +326,22 @@ if __name__ == "__main__":
 
     
     config = Config(mode='PCA_VAR')  # PCA_VAR, FMA_CORR, STAGE_DIFF
-    analyzer = EEGAnalyzer(config)
-    
+    for stage in config.STAGES:
+        for paradigm in config.PARADIGMS:
+            for freq_band in config.FREQ_BANDS:
+                analyzer = PCAVarianceAnalyzer(config, stage, paradigm, freq_band)
+                variance = analyzer.analyze()
+    # pre_analyzer = PCAVarianceAnalyzer(config, 'pre', 'AO1', 'alpha')
+    # pre_variance = pre_analyzer.analyze()
 
-    if config.mode == 'PCA_VAR':
-        analyzer.analyze_pca_variance()
-    elif config.mode == 'FMA_CORR':
-        analyzer.analyze_fma_correlation()
-    elif config.mode == 'STAGE_DIFF':
-        analyzer.analyze_stage_difference()
+    # post_analyzer = PCAVarianceAnalyzer(config, 'post', 'AO1', 'alpha')
+    # post_variance = post_analyzer.analyze()
+
+    # diff_analyzer = DifferenceAnalyzer(config, 'pre', 'AO1', 'alpha')
+    # diff_analyzer.analyze_stage_difference(pre_variance, post_variance)
+    # if config.mode == 'PCA_VAR':
+    #     analyzer.analyze_pca_variance()
+    # elif config.mode == 'FMA_CORR':
+    #     analyzer.analyze_fma_correlation()
+    # elif config.mode == 'STAGE_DIFF':
+    #     analyzer.analyze_stage_difference()

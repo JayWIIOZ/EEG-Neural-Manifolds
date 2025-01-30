@@ -254,7 +254,7 @@ def get_data_mat(data_list,n_components):
     rates_model = model.fit(rates.T)
     data_pca = [rates_model.transform(s.T) for s in data_list]
 
-    return data_pca, np.cumsum(rates_model.explained_variance_ratio_)
+    return data_pca, np.cumsum(rates_model.explained_variance_ratio_), rates_model.explained_variance_ratio_
 
 def eeg_bp_filter(data, fs, freqb='all', order=4):
     '''
