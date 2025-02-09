@@ -1,193 +1,156 @@
-"""
-AORestCls.py - Classifier for AO and Rest paradigm data analysis
-
-This script loads EEG data from specified ROIs, performs feature extraction using CCA,
-trains a classifier (LinearSVC by default), evaluates performance across subjects,
-and visualizes results with statistical significance markers.
-
-Usage:
-1. Ensure data paths are correctly set in 'CONFIG' section.
-2. Adjust parameters in 'CONFIG' as needed (ROIs, classifier, etc.).
-3. Run script. Results will be saved as EPS in specified output path.
-"""
-#%% ---------------------------- CONFIG --------------------------------
 import numpy as np
 import matplotlib.pyplot as plt
+from mat73 import loadmat
+import os
+from scipy import signal
+from sklearn.decomposition import PCA
+from sklearn.naive_bayes import GaussianNB
+from sklearn.svm import LinearSVC,SVC
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.ensemble import RandomForestClassifier
+from utils import *
 from scipy import stats
-from sklearn.svm import LinearSVC
-from utils import canoncorr, divide_pair  # Ensure custom utilities are available
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
-# Path configuration
-BASE_PATH = 'F:/CUHK_intern/RESULTS/Multimodality/'
-OUTPUT_PATH = 'F:/CUHK_Intern/RESULTS/figure/Multimodality/'
+class Config:
+    rng = np.random.default_rng(np.random.SeedSequence(12345))
+    ROIs = [1, 2, 19, 20, 59, 60, 61, 62]
+    # ROIs = [1]
+    train_stage = ['pre','post']
+    Paradigm = ['AO1','rest']
+    freqb = 'alpha'
+    pcNum = 4
+    rest_trial = 13
+    classifier_model = LinearSVC
+    classifier_params = {'max_iter':10000}
+    data_path = 'chronic_stroke/pca_data/'
+    save_path = 'EEG-Neural-Manifolds/analysis/chronic_stroke/results/classification_results/'
+    subj_list = ['kmt', 'ock']
+    # classifier_model = RandomForestClassifier
+    # classifier_params = {}
+os.makedirs(Config.save_path, exist_ok=True)
 
-# Experiment parameters
-ROIS = {
-    'ids': [1, 2, 19, 20, 59, 60, 61, 62],
-    'labels': ['PreCG.L', 'PreCG.R', 'SMA.L', 'SMA.R', 
-              'SPG.L', 'SPG.R', 'IPL.L', 'IPL.R']
-}
-TRAIN_STAGES = ['pre', 'post']
-PARADIGMS = ['AO1', 'rest']
-FREQ_BAND = 'alpha'
-REST_TRIAL_NUM = 13
-RANDOM_SEED = 12345
 
-# Classifier configuration
-CLASSIFIER = LinearSVC
-CLASSIFIER_PARAMS = {'max_iter': 10000}
-
-#%% -------------------------- CORE FUNCTIONS ---------------------------
-def load_subject_data(base_path, subj, roi, paradigm, stage, freq_band):
-    """Load preprocessed EEG data for a subject.
-    
-    Args:
-        base_path: Root directory for data
-        subj: Subject ID
-        roi: ROI number
-        paradigm: 'AO1' or 'rest'
-        stage: 'pre' or 'post'
-        freq_band: Frequency band identifier
-        
-    Returns:
-        numpy array: Data matrix of shape (trials, timepoints, components)
-    """
-    path = f"{base_path}{stage}/{paradigm}/{subj}/trial/{roi}/"
-    file_name = f"{subj}_{paradigm}_{stage}_pca_trial_{freq_band}.npy"
-    return np.load(path + file_name)
-
-def prepare_dataset(subjects, roi):
-    """Prepare combined dataset for all subjects and paradigms.
-    
-    Args:
-        subjects: List of subject IDs
-        roi: ROI number
-        
-    Returns:
-        list: Processed data arrays for all subjects
-    """
-    dataset = []
-    for subj in subjects:
-        ao_data = load_subject_data(
-            BASE_PATH+'pre/', subj, roi, PARADIGMS[0], 'pre', FREQ_BAND)
-        rest_data = load_subject_data(
-            BASE_PATH+'pre/', subj, roi, PARADIGMS[1], 'pre', FREQ_BAND)[:REST_TRIAL_NUM]
-        
-        combined = np.vstack([ao_data, rest_data])
-        rank = np.linalg.matrix_rank(combined)
-        dataset.append(combined[:, :, :rank])
-    
-    return dataset
-
-def compute_cca_features(temp1, temp2):
-    """Compute CCA-transformed features.
-    
-    Args:
-        temp1: Data matrix from subject 1
-        temp2: Data matrix from subject 2
-        
-    Returns:
-        tuple: Transformed features (X1_test, X2_test)
-    """
-    A, B, *_ = canoncorr(temp1, temp2, fullReturn=True)
-    X1_test = temp1 @ A @ np.linalg.inv(B)
-    X2_test = temp2 @ B @ np.linalg.inv(A)
-    return X1_test.reshape((-1, X1_test.shape[1]*X1_test.shape[2])), \
-           X2_test.reshape((-1, X2_test.shape[1]*X2_test.shape[2]))
-
-def train_evaluate_classifier(X_train, Y_train, X_test, Y_test):
-    """Train and evaluate classifier.
-    
-    Args:
-        X_train: Training features
-        Y_train: Training labels
-        X_test: Test features
-        Y_test: Test labels
-        
-    Returns:
-        float: Classification accuracy
-    """
-    clf = CLASSIFIER(**CLASSIFIER_PARAMS)
-    clf.fit(X_train, Y_train)
-    return clf.score(X_test, Y_test)
-
-#%% ------------------------ MAIN PROCESSING ----------------------------
 def main():
-    rng = np.random.default_rng(RANDOM_SEED)
-    subjects = ['kmt', 'wws', 'nsk', 'nwc', 'ock', 'wsc', 'wwf']
-    stage_results = []
-
-    for stage in TRAIN_STAGES:
+    stage_scores = []
+    for trainStage in Config.train_stage:
+        # load data
+        CCA_score_stage = []
+        AO_load_path = os.path.join(Config.data_path, trainStage, Config.Paradigm[0])
+        rest_load_path = os.path.join(Config.data_path, trainStage, Config.Paradigm[1])
         roi_scores = []
-        for roi in ROIS['ids']:
-            dataset = prepare_dataset(subjects, roi)
-            rank_min = min(d.shape[-1] for d in dataset)
-            subject_pairs = divide_pair(dataset)
-            
+        for roi in Config.ROIs:
+            data_list = []
+            for subj in Config.subj_list:
+                data_list_ = []
+
+                AO_path = os.path.join(AO_load_path, subj, str(roi), f'{subj}_pca_trial_{Config.freqb}.npy')
+                data_AO = np.load(AO_path)
+                data_list_.append(data_AO)
+
+                rest_path = os.path.join(rest_load_path, subj, str(roi), f'{subj}_pca_trial_{Config.freqb}.npy')
+                data_rest = np.load(rest_path)
+                data_list_.append(data_rest[:Config.rest_trial,:,:])
+                data_list_ = np.vstack(data_list_)
+                rank = min(np.linalg.matrix_rank(data_list_))
+                data_list.append(data_list_[:,:,:rank])
+
+            rank_min = min([data_tmp.shape[-1] for data_tmp in data_list])
+            subj_pair = divide_pair(data_list)
+            n_time = data_list_.shape[1]
+            n_comp = rank_min
+
             pair_scores = []
-            for pair in subject_pairs:
-                subj1_data = dataset[pair[0]]
-                subj2_data = dataset[pair[1]]
-                trial_min = min(subj1_data.shape[0], subj2_data.shape[0])
-                
-                # Prepare CCA features
-                temp1 = subj1_data[-trial_min:, :, :rank_min].reshape((-1, rank_min))
-                temp2 = subj2_data[-trial_min:, :, :rank_min].reshape((-1, rank_min))
-                X1, X2 = compute_cca_features(temp1, temp2)
-                
-                # Classification
+            for pair_num in range(len(subj_pair)):
+                temp_ind = subj_pair[pair_num]
+                trial_min = min(data_list[temp_ind[0]].shape[0], data_list[temp_ind[1]].shape[0])
+
+                temp1 = data_list[temp_ind[0]][-trial_min:,:,:rank_min].reshape((-1,n_comp))
+                temp2 = data_list[temp_ind[1]][-trial_min:,:,:rank_min].reshape((-1,n_comp))
+
+                A, B, *_ = canoncorr(temp1, temp2, fullReturn=True)
+                X1_test = temp1 @ A @ np.linalg.inv(B)
+                X2_test = temp2 @ B @ np.linalg.inv(A)
+                X1_test = X1_test.reshape((-1, n_time * n_comp))
+                X2_test = X2_test.reshape((-1, n_time * n_comp))
+
                 scores = []
-                for subj_idx in [0, 1]:
-                    X = dataset[pair[subj_idx]][-trial_min:].reshape((trial_min, -1))
-                    Y = np.concatenate([np.ones(trial_min-REST_TRIAL_NUM), 
-                                      2*np.ones(REST_TRIAL_NUM)])
-                    
-                    # Shuffle trials
-                    idx = rng.permutation(len(Y))
-                    X_train, Y_train = X[idx], Y[idx]
-                    X_test = X2[idx] if subj_idx == 0 else X1[idx]
-                    
-                    scores.append(train_evaluate_classifier(X_train, Y_train, X_test, Y[idx]))
-                
+                for subj_num in range(len(subj_pair[pair_num])):
+                    X = data_list[temp_ind[subj_num]][-trial_min:,:,:rank_min].reshape((trial_min,-1))
+                    Y = np.squeeze(np.hstack([np.ones((1, X.shape[0]-Config.rest_trial)), 2*np.ones((1, Config.rest_trial))]))
+
+                    # shuffle
+                    trial_index1 = np.arange(Y.shape[-1])
+                    # to guarantee shuffled ids
+                    while ((all_id_sh := Config.rng.permutation(trial_index1)) == trial_index1).all():
+                        continue
+                    trial_index1 = all_id_sh
+                    X_train, Y_train = X[trial_index1, :], Y[trial_index1]
+
+                    # min_max_scaler = MinMaxScaler()
+                    # X_train_scale = min_max_scaler.fit_transform(X_train)
+
+                    classifier = Config.classifier_model(**Config.classifier_params)
+                    classifier.fit(X_train, Y_train)
+
+                    Config.rng.shuffle(trial_index1)
+                    if subj_num == 0:
+                        X_test = X2_test[trial_index1,:]
+                    else:
+                        X_test = X1_test[trial_index1, :]
+                    Y_test = Y[trial_index1]
+
+                    # X_test_scale = min_max_scaler.fit_transform(X_test)
+
+                    scores.append(classifier.score(X_test, Y_test))
                 pair_scores.append(np.mean(scores))
             roi_scores.append(pair_scores)
-        stage_results.append(roi_scores)
+        stage_scores.append(roi_scores)
 
-    # Statistical testing
-    significance = []
-    for roi_idx in range(len(ROIS['ids'])):
-        _, p_val = stats.wilcoxon(stage_results[0][roi_idx], stage_results[1][roi_idx])
-        significance.append(p_val < 0.05)
+    # statistical test
+    sign_diff = np.squeeze(np.zeros((1,len(Config.ROIs))))
+    for roi_num in range(len(Config.ROIs)):
+        s, p = stats.wilcoxon(stage_scores[0][roi_num], stage_scores[1][roi_num])
+        if p < 0.05:
+            sign_diff[roi_num] = 1
 
-    # Visualization
-    fig, ax = plt.subplots(figsize=(12, 6))
-    x = np.arange(len(ROIS['ids'])) + 1
+    # visualization
+    y_cls = []
+    y_cls_std = []
+    for i in range(len(stage_scores)):
+        y_cls_temp = []
+        std_temp = []
+        for ii in range(len(Config.ROIs)):
+            y_cls_temp.append(np.mean(stage_scores[i][ii]))
+            std_temp.append(np.std(stage_scores[i][ii]))
+        y_cls.append(y_cls_temp)
+        y_cls_std.append(std_temp)
+    y_cls = np.array(y_cls)
+    y_cls_std = np.array(y_cls_std)
+
+    ROIs_label = ['PreCG.L','PreCG.R','SMA.L','SMA.R','SPG.L','SPG.R','IPL.L','IPL.R']
+    fig,ax = plt.subplots(ncols=1)
+    x = np.arange(0, len(Config.ROIs))+1
     width = 0.4
-    
-    for i, (stage, color) in enumerate(zip(['Pre', 'Post'], ['#82B0D2', '#FA7F6F'])):
-        means = [np.mean(scores) for scores in stage_results[i]]
-        stds = [np.std(scores) for scores in stage_results[i]]
-        
-        ax.bar(x + (i-0.5)*width, means, width, label=stage, color=color)
-        ax.errorbar(x + (i-0.5)*width, means, yerr=stds, fmt='o', 
-                   color='red', capsize=5)
-    
-    # Mark significant ROIs
-    sig_x = x[np.array(significance)]
-    ax.scatter(sig_x, [1.05]*sum(significance), marker='*', c='r', s=100, zorder=3)
-    
-    ax.set_xticks(x)
-    ax.set_xticklabels(ROIS['labels'], rotation=15)
-    ax.set_ylim(0.4, 0.75)
-    ax.set_xlabel('Regions of Interest', fontsize=12)
-    ax.set_ylabel('Classification Accuracy', fontsize=12)
-    ax.set_title(f'{FREQ_BAND.capitalize()} Band Classification Performance', fontsize=14)
-    ax.legend()
-    
-    plt.tight_layout()
-    plt.savefig(f"{OUTPUT_PATH}AO_Rest_cls_balanceTrial_{FREQ_BAND}.eps", 
-               format='eps', dpi=1000)
-    print("Processing completed. Results saved to:", OUTPUT_PATH)
+    rects1 = ax.bar(x - width/2, y_cls[0,:], width, label='Pre',color=['#82B0D2'])
+    ax.errorbar(x - width/2, y_cls[0,:], yerr=y_cls_std[0,:], ecolor='red', fmt='.',
+                markerfacecolor='#82B0D2', markeredgecolor='#82B0D2', elinewidth=1.5,capsize=5)
+    rects2 = ax.bar(x + width/2, y_cls[1,:], width, label='Post',color=['#FA7F6F'])
+    ax.errorbar(x + width/2, y_cls[1,:], yerr=y_cls_std[1,:], ecolor='red', fmt='.',
+                markerfacecolor='#FA7F6F', markeredgecolor='#FA7F6F', elinewidth=1.5, capsize=5)
+    sign = np.squeeze(np.ones((1,len(Config.ROIs))))
+    ax.scatter(np.arange(0,len(Config.ROIs))[sign_diff==1], sign[sign_diff==1], marker='*', c='r')
+    ax.set_xticks(np.arange(0, len(Config.ROIs), 1)+1)
+    ax.set_xticklabels(ROIs_label, rotation=15)
+    ax.set_ylim([0.4,0.75])
+    ax.set_xlabel('Regions of Interest', fontdict={'size':15})
+    ax.set_ylabel('Accuracy', fontdict={'size':15})
+    ax.tick_params(labelsize=12)
+    ax.set_title(Config.freqb+'-Classification Performance', fontdict={'size':15})
+    ax.legend(fontsize=15)
+    fig.tight_layout()
+    plt.show()
+    fig.savefig(Config.save_path + 'AO_Rest_cls_blanceTrial_' + Config.freqb + '.png', format='png', dpi=1000)
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

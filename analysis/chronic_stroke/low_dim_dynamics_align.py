@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import os
-from Code.utils import *
+from utils import *
 
 
 # better to adjust the length of data, 20 may be enough!
@@ -9,14 +9,15 @@ from Code.utils import *
 # trial_num = 100
 ROIs = [1]
 Paradigm = 'AO1'
-freqb = 'beta'
+freqb = 'alpha'
 train_stage = ['pre','post']
 threshold = 1 # 0 - 1
 
-load_path = 'F:/CUHK_intern/RESULTS/Multimodality/'
+load_path = 'chronic_stroke/pca_data/'
 # subj_list = os.listdir(load_path)
-subj_list = ['kmt','wws','wsc','nsk','nwc','ock','wwf']
-save_path = 'F:\CUHK_Intern\RESULTS/figure\Multimodality/trajectory/'
+subj_list = ['kmt','ock']
+save_path = 'EEG-Neural-Manifolds/analysis/chronic_stroke/results/trajectory/'
+os.makedirs(save_path, exist_ok=True)
 
 GCCA_score = []
 for roi in ROIs:
@@ -25,9 +26,8 @@ for roi in ROIs:
     for trainStage in train_stage:
         data_subj_list = []
         for subj in subj_list:
-            data_path = load_path + trainStage + '/' + Paradigm + '/' + subj + '/trial/' + str(roi) + '/'
-            data_pca = np.load(
-                data_path + subj + '_' + Paradigm + '_' + trainStage + '_pca_trial_' + freqb + '.npy')
+            data_path = os.path.join(load_path, trainStage, Paradigm, subj, str(roi), f'{subj}_pca_trial_{freqb}.npy')
+            data_pca = np.load(data_path)
             time_len = data_pca.shape[1]
             rank = min(np.linalg.matrix_rank(data_pca))
             data_subj_list.append(np.reshape(data_pca[:,:,:rank], (-1, rank)))
@@ -68,10 +68,10 @@ for roi in ROIs:
             ax1.set_ylabel('CC2',fontsize=15)
             ax1.set_zlabel('CC3',fontsize=15)
             ax1.set_title(subj_list[subj_pair[pair_draw][0]] + ' x ' + subj_list[subj_pair[pair_draw][1]],fontsize=15)
-            fig1.show()
             fig1.savefig(save_path + subj_list[subj_pair[pair_draw][0]] + '-' + subj_list[subj_pair[pair_draw][1]] +
-                         '_Region_' + str(roi) + '_' + freqb + '_' + trainStage + '_aligned.eps', format='eps', dpi=1000)
-
+                         '_Region_' + str(roi) + '_' + freqb + '_' + trainStage + '_aligned.png', format='png', dpi=1000)
+            fig1.show()
+            
     # data_aligned_avg = [np.mean(temp, axis=0) for temp in data_aligned[4]]
     # for i in range(len(subj_pair[4])):
     #     fig1 = plt.figure(i)
