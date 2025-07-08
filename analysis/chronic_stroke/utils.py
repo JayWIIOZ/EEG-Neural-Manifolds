@@ -8,6 +8,9 @@ from functools import wraps
 import os, time
 from sklearn.decomposition import PCA
 import random
+from scipy.optimize import linear_sum_assignment
+from scipy.spatial.distance import cdist
+import statsmodels.stats.power as smp
 
 def canoncorr(X: np.array, Y: np.array, fullReturn: bool = False) -> np.array:
     """
@@ -254,7 +257,7 @@ def get_data_mat(data_list,n_components):
     rates_model = model.fit(rates.T)
     data_pca = [rates_model.transform(s.T) for s in data_list]
 
-    return data_pca, np.cumsum(rates_model.explained_variance_ratio_), rates_model.explained_variance_ratio_
+    return data_pca, np.cumsum(rates_model.explained_variance_ratio_)
 
 def eeg_bp_filter(data, fs, freqb='all', order=4):
     '''
@@ -327,3 +330,76 @@ def minmax_normalize(data):
 
     normalized_data = (data - min_val) / (max_val - min_val)
     return normalized_data
+
+def compare_pc_weights(weights1, weights2):
+    """
+    Compare the similarity of two PCA weight matrices to solve the alignment problem
+
+    Parameters:
+    weights1: PCA weight matrix of the first dataset (n_components × n_features)
+    weights2: PCA weight matrix of the second dataset (n_components × n_features)
+
+    Returns:
+    matched_pairs: index of matched PC pairs
+    similarity_scores: similarity scores for each pair of matches
+    aligned_weights1: aligned weight matrix 1
+    aligned_weights2: aligned weight matrix 2
+    """
+
+    weights1 = np.atleast_2d(weights1)
+    weights2 = np.atleast_2d(weights2)
+
+    # 1. Calculate the cosine similarity between all PC pairs
+    # Use absolute value to handle the sign reversal problem
+    similarity_matrix = np.abs(1 - cdist(np.abs(weights1), np.abs(weights2),
+                                         metric='cosine'))
+
+    # 2. Use the Hungarian algorithm to find the best match
+    row_ind, col_ind = linear_sum_assignment(-similarity_matrix)
+
+    matched_pairs = []
+    similarity_scores = []
+
+    for i, j in zip(row_ind, col_ind):
+        if i < weights1.shape[0] and j < weights2.shape[0]:
+            matched_pairs.append((i, j))
+            score = similarity_matrix[i, j]
+            similarity_scores.append(score)
+
+    return matched_pairs, similarity_scores, similarity_matrix
+
+def cohens_d(x, y):
+    '''
+    Effect size
+    '''
+    nx = len(x)
+    ny = len(y)
+    dof = nx + ny - 2
+    pooled_std = np.sqrt(((nx-1)*np.std(x, ddof=1)**2 + (ny-1)*np.std(y, ddof=1)**2) / dof)
+    return (np.mean(x) - np.mean(y)) / pooled_std
+
+def stat_power(effect_size,sample_size,alpha=0.05,power=0.8):
+    '''
+    Statistical power
+    '''
+
+    # statistical power
+    power_analysis = smp.TTestPower()
+    current_power = power_analysis.power(
+        effect_size=effect_size,
+        nobs=sample_size,
+        alpha=alpha,
+        alternative='two-sided'
+    )
+
+    # required sample size for 80% statistical power
+    required_n = power_analysis.solve_power(
+        effect_size=effect_size,
+        power=power,
+        alpha=alpha,
+        alternative='two-sided'
+    )
+    return current_power, required_n
+
+
+
